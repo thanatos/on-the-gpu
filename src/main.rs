@@ -56,7 +56,8 @@ impl IntoIterator for &ExtraEnv {
                 ("__NV_PRIME_RENDER_OFFLOAD", "1"),
                 ("__VK_LAYER_NV_optimus", "NVIDIA_only"),
                 ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
-            ].as_slice(),
+            ]
+            .as_slice(),
         };
         envs.iter().copied()
     }
@@ -82,19 +83,19 @@ fn main() {
                 cmd.push("pvkrun".to_owned().into());
                 cmd.extend(args.command);
                 (cmd, ExtraEnv::None)
-            },
+            }
             GpuMode::Primusrun => {
                 let mut cmd = Vec::<OsString>::new();
                 cmd.push("primusrun".to_owned().into());
                 cmd.extend(args.command);
                 (cmd, ExtraEnv::None)
-            },
+            }
             GpuMode::Optirun => {
                 let mut cmd = Vec::<OsString>::new();
                 cmd.push("optirun".to_owned().into());
                 cmd.extend(args.command);
                 (cmd, ExtraEnv::None)
-            },
+            }
         }
     };
 
@@ -103,7 +104,8 @@ fn main() {
             .enable_io()
             .build()
             .unwrap();
-        rt.block_on(run_game_with_logs(&args.game_name, cmd_to_run, extra_env)).unwrap();
+        rt.block_on(run_game_with_logs(&args.game_name, cmd_to_run, extra_env))
+            .unwrap();
     } else {
         print_cmd(
             std::io::stderr(),
@@ -112,7 +114,10 @@ fn main() {
         )
         .unwrap();
 
-        let cmd_to_run = cmd_to_run.into_iter().map(|arg| os_str_to_cstring(&arg)).collect::<Vec<_>>();
+        let cmd_to_run = cmd_to_run
+            .into_iter()
+            .map(|arg| os_str_to_cstring(&arg))
+            .collect::<Vec<_>>();
 
         if matches!(extra_env, ExtraEnv::None) {
             nix::unistd::execvp(&cmd_to_run[0], &cmd_to_run).unwrap();
@@ -186,7 +191,11 @@ fn build_log_filename(base_name: &str, overridden_logs_dir: Option<&Path>) -> Pa
     }
 }
 
-async fn run_game_with_logs(game_name: &str, command: Vec<OsString>, extra_env: ExtraEnv) -> anyhow::Result<()> {
+async fn run_game_with_logs(
+    game_name: &str,
+    command: Vec<OsString>,
+    extra_env: ExtraEnv,
+) -> anyhow::Result<()> {
     let cmd_bin = &command[0];
 
     let log_path = build_log_filename(game_name, None);
@@ -201,7 +210,12 @@ async fn run_game_with_logs(game_name: &str, command: Vec<OsString>, extra_env: 
     let mut stderr = tokio::io::stderr();
 
     let mut intro = Vec::<u8>::new();
-    print_cmd(&mut intro, command.iter().map(|a| a.as_os_str()), &extra_env).unwrap();
+    print_cmd(
+        &mut intro,
+        command.iter().map(|a| a.as_os_str()),
+        &extra_env,
+    )
+    .unwrap();
     stderr.write_all(&intro).await?;
     log_file.write_all(&intro).await?;
 
