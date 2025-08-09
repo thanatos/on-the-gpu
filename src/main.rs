@@ -28,12 +28,38 @@ struct Args {
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum GpuMode {
     None,
+    /// Run a Vulkan game as if it were under `prime-run`.
+    /// (However, `prime-run` itself is so simple, we just do the same thing, but without actually
+    /// calling `prime-run`.)
+    NvPrimeRun,
     /// Run a Vulkan game on the GPU. Wraps it in `pvkrun`.
-    Vulkan,
+    Pvkrun,
     /// Wrap a game in `primusrun`; this is the newer wrapper.
-    Primus,
+    Primusrun,
     /// Wrap a game in `optirun`; this is the older wrapper.
     Optirun,
+}
+
+#[derive(Debug)]
+enum ExtraEnv {
+    None,
+    NvPrimeRun,
+}
+
+impl IntoIterator for &ExtraEnv {
+    type Item = (&'static str, &'static str);
+    type IntoIter = std::iter::Copied<std::slice::Iter<'static, Self::Item>>;
+    fn into_iter(self) -> Self::IntoIter {
+        let envs = match self {
+            ExtraEnv::None => [].as_slice(),
+            ExtraEnv::NvPrimeRun => [
+                ("__NV_PRIME_RENDER_OFFLOAD", "1"),
+                ("__VK_LAYER_NV_optimus", "NVIDIA_only"),
+                ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
+            ].as_slice(),
+        };
+        envs.iter().copied()
+    }
 }
 
 fn main() {
@@ -45,28 +71,29 @@ fn main() {
         std::process::exit(1);
     }
 
-    let gpu_mode = args.gpu.unwrap_or(GpuMode::Vulkan);
+    let gpu_mode = args.gpu.unwrap_or(GpuMode::NvPrimeRun);
 
-    let cmd_to_run = {
+    let (cmd_to_run, extra_env) = {
         match gpu_mode {
-            GpuMode::None => args.command,
-            GpuMode::Vulkan => {
+            GpuMode::None => (args.command, ExtraEnv::None),
+            GpuMode::NvPrimeRun => (args.command, ExtraEnv::NvPrimeRun),
+            GpuMode::Pvkrun => {
                 let mut cmd = Vec::<OsString>::new();
                 cmd.push("pvkrun".to_owned().into());
                 cmd.extend(args.command);
-                cmd
+                (cmd, ExtraEnv::None)
             },
-            GpuMode::Primus => {
+            GpuMode::Primusrun => {
                 let mut cmd = Vec::<OsString>::new();
                 cmd.push("primusrun".to_owned().into());
                 cmd.extend(args.command);
-                cmd
+                (cmd, ExtraEnv::None)
             },
             GpuMode::Optirun => {
                 let mut cmd = Vec::<OsString>::new();
                 cmd.push("optirun".to_owned().into());
                 cmd.extend(args.command);
-                cmd
+                (cmd, ExtraEnv::None)
             },
         }
     };
@@ -76,26 +103,56 @@ fn main() {
             .enable_io()
             .build()
             .unwrap();
-        rt.block_on(run_game_with_logs(&args.game_name, cmd_to_run)).unwrap();
+        rt.block_on(run_game_with_logs(&args.game_name, cmd_to_run, extra_env)).unwrap();
     } else {
         print_cmd(
             std::io::stderr(),
             cmd_to_run.iter().map(|a| a.as_os_str()),
+            &extra_env,
         )
         .unwrap();
 
         let cmd_to_run = cmd_to_run.into_iter().map(|arg| os_str_to_cstring(&arg)).collect::<Vec<_>>();
 
-        nix::unistd::execvp(&cmd_to_run[0], &cmd_to_run).unwrap();
+        if matches!(extra_env, ExtraEnv::None) {
+            nix::unistd::execvp(&cmd_to_run[0], &cmd_to_run).unwrap();
+        } else {
+            let mut new_env = Vec::new();
+            for (k, v) in std::env::vars_os() {
+                let mut kv = k;
+                kv.push("=");
+                kv.push(v);
+                new_env.push(os_str_to_cstring(&kv));
+            }
+            // TODO: we should really make sure none of these conflict with any of the above.
+            for (k, v) in &extra_env {
+                let kv = format!("{k}={v}");
+                let mut kv = kv.into_bytes();
+                kv.push(0);
+                let kv = CString::from_vec_with_nul(kv).unwrap();
+                new_env.push(kv);
+            }
+            nix::unistd::execvpe(&cmd_to_run[0], &cmd_to_run, &new_env).unwrap();
+        }
     }
 }
 
 fn print_cmd<'a>(
     mut w: impl std::io::Write,
     command: impl IntoIterator<Item = &'a OsStr>,
+    extra_env: &ExtraEnv,
 ) -> std::io::Result<()> {
     writeln!(&mut w, "══ Start ══")?;
     writeln!(&mut w, "CWD: {:?}", std::env::current_dir())?;
+    match extra_env {
+        ExtraEnv::None => writeln!(&mut w, "Environment: (same)")?,
+        e => {
+            writeln!(&mut w, "Envionment:")?;
+            for (k, v) in e {
+                writeln!(&mut w, "  {k}={v}")?;
+            }
+        }
+    }
     writeln!(&mut w, "Arguments:")?;
     for (idx, arg) in command.into_iter().enumerate() {
         writeln!(&mut w, "  argv[{idx}] = {arg:?}")?;
@@ -129,7 +186,7 @@ fn build_log_filename(base_name: &str, overridden_logs_dir: Option<&Path>) -> Pa
     }
 }
 
-async fn run_game_with_logs(game_name: &str, command: Vec<OsString>) -> anyhow::Result<()> {
+async fn run_game_with_logs(game_name: &str, command: Vec<OsString>, extra_env: ExtraEnv) -> anyhow::Result<()> {
     let cmd_bin = &command[0];
 
     let log_path = build_log_filename(game_name, None);
@@ -144,7 +201,7 @@ async fn run_game_with_logs(game_name: &str, command: Vec<OsString>) -> anyhow::
     let mut stderr = tokio::io::stderr();
 
     let mut intro = Vec::<u8>::new();
-    print_cmd(&mut intro, command.iter().map(|a| a.as_os_str())).unwrap();
+    print_cmd(&mut intro, command.iter().map(|a| a.as_os_str()), &extra_env).unwrap();
     stderr.write_all(&intro).await?;
     log_file.write_all(&intro).await?;
 
@@ -164,6 +221,7 @@ async fn run_game_with_logs(game_name: &str, command: Vec<OsString>) -> anyhow::
     // This call SIGABRTs
     let mut child = tokio::process::Command::new(cmd_bin)
         .args(&command[1..])
+        .envs(&extra_env)
         .stdout(cmd_stdout)
         .stderr(cmd_stderr)
         .spawn()
